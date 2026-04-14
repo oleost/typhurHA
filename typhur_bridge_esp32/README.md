@@ -1,3 +1,6 @@
+#### 
+NOT WORKING; JUST DRAFT AI CODING!
+
 # Typhur BLE Bridge for ESP32
 
 This is a firmware implementation for ESP32 that connects directly to Typhur thermometers via Bluetooth Low Energy (BLE) and forwards data to Home Assistant via MQTT.
