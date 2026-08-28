@@ -4,7 +4,7 @@
 
 Home Assistant app that connects **Typhur Sync thermometers** (Sync Quad / WT08, Sync Dual / WT03, and other WT-series models) to Home Assistant via MQTT auto-discovery, without requiring the Typhur phone app.
 
-The bridge is model-agnostic: it subscribes with an MQTT wildcard (`device/+/{deviceId}/pub`) so it never needs to know the model string, and probe sensors are created from whatever probes the device actually reports (2, 4, …) rather than a hardcoded count.
+The bridge is model-agnostic: it takes `deviceModel` straight from the API and probe sensors are created from whatever probes the device actually reports (2, 4, …) rather than a hardcoded count. (The MQTT subscribe topic must contain the real model — AWS IoT drops the connection if the cert policy doesn't authorize the exact topic filter, so a `+` wildcard doesn't work there.)
 
 ## Architecture
 
@@ -65,7 +65,7 @@ Example response:
 
 ### MQTT topics
 
-- Subscribe: `device/+/{deviceId}/pub` (wildcard — the bridge does not depend on `deviceModel`)
+- Subscribe: `device/{deviceModel}/{deviceId}/pub` (`deviceModel` comes from the API; a `+` wildcard here gets the connection dropped by AWS IoT)
 - Relevant messages: `cmdType` contains `"status:report"`
 
 ### Temperature encoding

@@ -50,6 +50,12 @@ APP_ID = "ap206cba3069ed4a11"
 APP_VERSION = "4200"
 APP_DEVICE_SN = hashlib.md5(b"ha_typhur_bridge_v1").hexdigest()
 HA_DISCOVERY_PREFIX = "homeassistant"
+# Reconnect backoff for the Typhur cloud MQTT connection. Starts small for
+# ordinary network blips and triples up to the max when the connection keeps
+# dropping right after connecting (5s → 15s → 45s → … → 15min), so a broken
+# setup never hammers Typhur's broker.
+RECONNECT_BACKOFF_MIN = 5
+RECONNECT_BACKOFF_MAX = 900
 
 
 def load_options():
@@ -422,6 +428,8 @@ class TyphurBridge:
         # device_id -> set of probeColor values already published to HA discovery
         self.discovered_probes = {}
         self._typhur_conn = None  # (broker, port) for reconnects
+        self._last_connect_at = 0.0
+        self._backoff = RECONNECT_BACKOFF_MIN
 
     def setup_ha_mqtt(self):
         self.ha_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="typhur_bridge_ha")
@@ -450,10 +458,20 @@ class TyphurBridge:
                 seen.add(color)
 
     def subscribe_all(self, client):
-        # Model-agnostic: '+' matches any deviceModel segment, so the bridge
-        # never needs to know whether this is a WT08, WT03, or anything else.
+        # The deviceModel comes straight from the API (device/bind/list), so this
+        # stays model-agnostic — but the topic MUST contain the real model, not a
+        # wildcard: AWS IoT closes the connection if the cert's policy doesn't
+        # authorize the exact topic filter, and '+' is not authorized.
         for dev in self.devices:
-            topic = f"device/+/{dev['deviceId']}/pub"
+            model = dev.get("deviceModel")
+            if not model:
+                model = "WT08"
+                log.warning(
+                    f"device {dev['deviceId']} has no 'deviceModel' in the API "
+                    f"response — falling back to '{model}'. Keys present: "
+                    f"{sorted(dev.keys())}"
+                )
+            topic = f"device/{model}/{dev['deviceId']}/pub"
             client.subscribe(topic)
             log.info(f"Subscribed to: {topic}")
 
@@ -480,6 +498,20 @@ class TyphurBridge:
         self._sync_probe_discovery(dev, data)
         return device_id
 
+    def next_reconnect_backoff(self, uptime):
+        """Escalate the reconnect delay when the connection keeps flapping.
+
+        paho's own backoff never escalates for our failure mode: every reconnect
+        "succeeds" at the MQTT level before the broker drops us. So a connection
+        that barely stayed up (usually an unauthorized SUBSCRIBE topic) backs off
+        hard; one that lasted a while was a normal blip and resets to the minimum.
+        """
+        if uptime < 30:
+            self._backoff = min(self._backoff * 3, RECONNECT_BACKOFF_MAX)
+        else:
+            self._backoff = RECONNECT_BACKOFF_MIN
+        return self._backoff
+
     def setup_typhur_mqtt(self, client_id, broker, port):
         self._typhur_conn = (broker, port)
 
@@ -487,6 +519,7 @@ class TyphurBridge:
             if rc != 0:
                 log.error(f"Typhur MQTT connection failed: rc={rc}")
                 return
+            self._last_connect_at = time.time()
             log.info("Connected to Typhur cloud MQTT")
             self.subscribe_all(client)
 
@@ -496,11 +529,26 @@ class TyphurBridge:
             except Exception as e:
                 log.error(f"Message error: {e}")
 
-        def on_disconnect(client, userdata, rc, properties=None, reasonCode=None):
-            if rc == 0:
-                log.info("Typhur MQTT disconnected cleanly")
-                return
-            log.warning(f"Typhur MQTT disconnected (rc={rc}); paho will auto-reconnect")
+        # paho 2.x VERSION2 signature: (client, userdata, disconnect_flags,
+        # reason_code, properties). This bridge never disconnects on purpose, so
+        # every call here is an unexpected drop.
+        def on_disconnect(client, userdata, disconnect_flags=None,
+                          reason_code=None, properties=None):
+            uptime = time.time() - self._last_connect_at
+            delay = self.next_reconnect_backoff(uptime)
+            if delay >= 60:
+                log.error(
+                    f"Typhur MQTT dropped after only {uptime:.0f}s connected "
+                    f"(reason={reason_code}) — this usually means AWS IoT "
+                    f"rejected the SUBSCRIBE topic (check the deviceModel logged "
+                    f"above). Waiting {delay}s before retrying."
+                )
+            else:
+                log.warning(
+                    f"Typhur MQTT disconnected (reason={reason_code}); "
+                    f"reconnecting in {delay}s."
+                )
+            time.sleep(delay)
 
         self.typhur_client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
@@ -509,8 +557,8 @@ class TyphurBridge:
         self.typhur_client.on_connect = on_connect
         self.typhur_client.on_message = on_message
         self.typhur_client.on_disconnect = on_disconnect
-        # Back off from 1s up to 2min between reconnect attempts.
-        self.typhur_client.reconnect_delay_set(min_delay=1, max_delay=120)
+        # We handle the real backoff in on_disconnect; keep paho's own delay tiny.
+        self.typhur_client.reconnect_delay_set(min_delay=1, max_delay=2)
 
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.load_cert_chain(CERT_FILE, KEY_FILE)

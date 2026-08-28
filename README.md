@@ -13,8 +13,8 @@ fetches the MQTT client certificate and broker endpoint automatically, and
 forwards live readings to your local MQTT broker. All sensors are created via
 Home Assistant MQTT discovery.
 
-It is model-agnostic: it subscribes with an MQTT wildcard and creates probe
-sensors from whatever the device actually reports, so no per-model
+It is model-agnostic: the device model comes from the API and probe sensors are
+created from whatever the device actually reports, so no per-model
 configuration is needed.
 
 ## Install
