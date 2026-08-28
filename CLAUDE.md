@@ -12,7 +12,7 @@ The bridge is model-agnostic: it subscribes with an MQTT wildcard (`device/+/{de
 Typhur probe → Typhur cloud (AWS IoT MQTT) → typhur_bridge → Local MQTT → Home Assistant
 ```
 
-The bridge authenticates with the Typhur cloud API, subscribes to the device's real-time data stream, and forwards readings to the local HA MQTT broker. All sensors are created automatically via HA discovery.
+The bridge authenticates with the Typhur cloud API, subscribes to the device's real-time data stream, and forwards readings to the local HA MQTT broker. All sensors are created automatically via HA discovery. Data is routed through Typhur's cloud; there is no local-only connection.
 
 ## Key files
 
@@ -65,7 +65,7 @@ Example response:
 
 ### MQTT topics
 
-- Subscribe: `device/{deviceModel}/{deviceId}/pub`
+- Subscribe: `device/+/{deviceId}/pub` (wildcard — the bridge does not depend on `deviceModel`)
 - Relevant messages: `cmdType` contains `"status:report"`
 
 ### Temperature encoding
@@ -74,9 +74,3 @@ Values are in tenths of Fahrenheit. Convert to Celsius:
 ```python
 celsius = (value / 10.0 - 32) * 5 / 9
 ```
-
-## Future: BLE support
-
-The long-term goal is a direct BLE mode that works without cloud connectivity. The BLE protocol has been partially reverse-engineered from the Typhur APK. The notification UUID is `0000ff02-0000-1000-8000-00805f9b34fb`. Decrypted BLE messages follow the same JSON structure as cloud messages (`cmdType`, `cmdData`).
-
-BLE support will be implemented as an optional mode alongside cloud — not a replacement.

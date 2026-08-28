@@ -50,7 +50,7 @@ For the device itself:
 
 ## Notes
 
-- Data is routed via Typhur's cloud (AWS IoT). A local/Bluetooth connection is not currently supported.
+- Data is routed via Typhur's cloud (AWS IoT). There is no local-only connection.
 - Certificates are fetched automatically from the Typhur API and cached in `/data/`. They are valid for several years.
 - The token is cached in `/data/typhur_token.txt` and refreshed automatically when it expires.
 - The MQTT broker endpoint is fetched dynamically from the Typhur API — no hardcoded server addresses.

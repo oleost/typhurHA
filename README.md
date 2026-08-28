@@ -32,14 +32,9 @@ Per probe: temperature, ambient temperature, battery, state.
 Per device: battery, WiFi signal.
 Probe sensors appear the first time a probe sends a reading.
 
-## Status
-
-Cloud/WiFi mode works. Direct BLE mode (no cloud dependency) is a future goal —
-see [`CLAUDE.md`](CLAUDE.md) for protocol notes.
-
 ## Notes
 
-- Data is routed through Typhur's cloud; a local-only connection is not yet supported.
+- Data is routed through Typhur's cloud (AWS IoT); there is no local-only connection.
 - Certificates and token are cached in `/data/` and refreshed automatically.
 - The `SIGN_CONSTANT`, `APP_ID`, and `APP_VERSION` constants in `run.py` are
   extracted from the Typhur APK and are the same for all users — not secrets.
