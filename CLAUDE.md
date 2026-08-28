@@ -2,7 +2,9 @@
 
 ## Goal
 
-Home Assistant app that connects the **Typhur Sync Quad (WT08)** thermometer to Home Assistant via MQTT auto-discovery, without requiring the Typhur phone app.
+Home Assistant app that connects **Typhur Sync thermometers** (Sync Quad / WT08, Sync Dual / WT03, and other WT-series models) to Home Assistant via MQTT auto-discovery, without requiring the Typhur phone app.
+
+The bridge is model-agnostic: it subscribes with an MQTT wildcard (`device/+/{deviceId}/pub`) so it never needs to know the model string, and probe sensors are created from whatever probes the device actually reports (2, 4, …) rather than a hardcoded count.
 
 ## Architecture
 

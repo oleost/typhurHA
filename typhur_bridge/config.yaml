@@ -1,6 +1,6 @@
 name: "Typhur Bridge"
-description: "Connects Typhur Sync Quad thermometer to Home Assistant via MQTT auto-discovery using your Typhur account credentials"
-version: "1.3.1"
+description: "Connects Typhur Sync thermometers (Sync Quad, Sync Dual, ...) to Home Assistant via MQTT auto-discovery using your Typhur account credentials"
+version: "1.4.0"
 slug: "typhur_bridge"
 init: false
 arch:

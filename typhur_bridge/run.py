@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Typhur Bridge - Home Assistant Add-on
-Connects Typhur Sync Quad thermometer to Home Assistant via MQTT auto-discovery.
-Fetches MQTT certificates automatically from the Typhur API.
+Connects Typhur Sync thermometers (Sync Quad / Sync Dual, and other WT-series
+models) to Home Assistant via MQTT auto-discovery. Probe sensors are created
+from whatever the device actually reports, so no per-model configuration is
+needed. Fetches MQTT certificates automatically from the Typhur API.
 """
 import json
 import ssl
@@ -251,65 +253,64 @@ def get_devices(token):
     return []
 
 
-def publish_discovery(ha_client, device):
-    device_id = str(device["deviceId"])
-    device_name = device.get("deviceName", "Typhur Sync Quad")
-    device_model = device.get("deviceModel", "WT08")
-    state_topic = f"typhur/{device_id}/state"
+def device_display_name(device):
+    return device.get("deviceName") or "Typhur Sync"
 
-    device_info = {
+
+def device_info_block(device):
+    device_id = str(device["deviceId"])
+    return {
         "identifiers": [f"typhur_{device_id}"],
-        "name": device_name,
+        "name": device_display_name(device),
         "manufacturer": "Typhur",
-        "model": device_model,
+        # deviceModel is informational only — the bridge no longer depends on it.
+        "model": device.get("deviceModel") or "Typhur Sync",
     }
 
-    probes = (device.get("lastStatusCmd") or {}).get("cmdData", {}).get("probes", [])
-    if not probes:
-        probes = [{"probeColor": f"probe{i}"} for i in range(1, 5)]
 
-    sensors = []
+def probe_sensor_defs(device_id, device_name, color):
+    """Sensor definitions for a single probe, keyed by probeColor (probe1..probeN)."""
+    label = color.replace("probe", "Probe ")
+    base = f"(value_json.cmdData.probes | selectattr('probeColor','eq','{color}') | list | first)"
+    return [
+        {
+            "uid": f"typhur_{device_id}_{color}_temp",
+            "name": f"{device_name} {label} Temperature",
+            "unit": "°C",
+            "device_class": "temperature",
+            "state_class": "measurement",
+            "value_template": f"{{{{ (({base}.curTemperature | float) / 10 - 32) * 5 / 9 | round(1) }}}}",
+        },
+        {
+            "uid": f"typhur_{device_id}_{color}_ambient",
+            "name": f"{device_name} {label} Ambient Temperature",
+            "unit": "°C",
+            "device_class": "temperature",
+            "state_class": "measurement",
+            "value_template": f"{{{{ (({base}.curAmbientTemperature | float) / 10 - 32) * 5 / 9 | round(1) }}}}",
+        },
+        {
+            "uid": f"typhur_{device_id}_{color}_battery",
+            "name": f"{device_name} {label} Battery",
+            "unit": "%",
+            "device_class": "battery",
+            "state_class": "measurement",
+            "value_template": f"{{{{ {base}.batteryValue }}}}",
+        },
+        {
+            "uid": f"typhur_{device_id}_{color}_state",
+            "name": f"{device_name} {label} State",
+            "unit": None,
+            "device_class": None,
+            "state_class": None,
+            "value_template": f"{{{{ {base}.cookingState }}}}",
+        },
+    ]
 
-    for probe in probes:
-        color = probe.get("probeColor", "probe1")
-        label = color.replace("probe", "Probe ")
-        base = f"(value_json.cmdData.probes | selectattr('probeColor','eq','{color}') | list | first)"
-        sensors += [
-            {
-                "uid": f"typhur_{device_id}_{color}_temp",
-                "name": f"{device_name} {label} Temperature",
-                "unit": "°C",
-                "device_class": "temperature",
-                "state_class": "measurement",
-                "value_template": f"{{{{ (({base}.curTemperature | float) / 10 - 32) * 5 / 9 | round(1) }}}}",
-            },
-            {
-                "uid": f"typhur_{device_id}_{color}_ambient",
-                "name": f"{device_name} {label} Ambient Temperature",
-                "unit": "°C",
-                "device_class": "temperature",
-                "state_class": "measurement",
-                "value_template": f"{{{{ (({base}.curAmbientTemperature | float) / 10 - 32) * 5 / 9 | round(1) }}}}",
-            },
-            {
-                "uid": f"typhur_{device_id}_{color}_battery",
-                "name": f"{device_name} {label} Battery",
-                "unit": "%",
-                "device_class": "battery",
-                "state_class": "measurement",
-                "value_template": f"{{{{ {base}.batteryValue }}}}",
-            },
-            {
-                "uid": f"typhur_{device_id}_{color}_state",
-                "name": f"{device_name} {label} State",
-                "unit": None,
-                "device_class": None,
-                "state_class": None,
-                "value_template": f"{{{{ {base}.cookingState }}}}",
-            },
-        ]
 
-    sensors += [
+def device_sensor_defs(device_id, device_name):
+    """Device-level sensors that exist regardless of how many probes are attached."""
+    return [
         {
             "uid": f"typhur_{device_id}_battery",
             "name": f"{device_name} Battery",
@@ -328,6 +329,8 @@ def publish_discovery(ha_client, device):
         },
     ]
 
+
+def publish_sensor_configs(ha_client, device_info, state_topic, sensors):
     for s in sensors:
         payload = {
             "name": s["name"],
@@ -349,8 +352,56 @@ def publish_discovery(ha_client, device):
             retain=True
         )
 
-    log.info(f"Discovery published for {device_name} ({len(sensors)} sensors)")
-    return state_topic
+
+def probe_colors_from_status(data):
+    """Extract probeColor values from a status:report payload, in order."""
+    probes = ((data or {}).get("cmdData") or {}).get("probes") or []
+    colors = []
+    for i, probe in enumerate(probes, start=1):
+        colors.append(probe.get("probeColor") or f"probe{i}")
+    return colors
+
+
+def publish_device_discovery(ha_client, device):
+    """Publish device-level sensors + any probes already known from the bind list.
+
+    Probe sensors are model-agnostic: whatever probes appear in the API snapshot
+    (or later in live status messages) get sensors. Returns (state_topic, known_probe_colors).
+    """
+    device_id = str(device["deviceId"])
+    device_name = device_display_name(device)
+    state_topic = f"typhur/{device_id}/state"
+    device_info = device_info_block(device)
+
+    publish_sensor_configs(
+        ha_client, device_info, state_topic,
+        device_sensor_defs(device_id, device_name),
+    )
+
+    known = probe_colors_from_status(device.get("lastStatusCmd"))
+    for color in known:
+        publish_sensor_configs(
+            ha_client, device_info, state_topic,
+            probe_sensor_defs(device_id, device_name, color),
+        )
+
+    log.info(
+        f"Discovery published for {device_name}: device sensors"
+        + (f" + {len(known)} probe(s) {known}" if known else " (probes will be added as they report)")
+    )
+    return state_topic, set(known)
+
+
+def publish_probe_discovery(ha_client, device, color):
+    """Publish sensors for one probe discovered from a live status message."""
+    device_id = str(device["deviceId"])
+    device_name = device_display_name(device)
+    state_topic = f"typhur/{device_id}/state"
+    publish_sensor_configs(
+        ha_client, device_info_block(device), state_topic,
+        probe_sensor_defs(device_id, device_name, color),
+    )
+    log.info(f"Discovered new probe '{color}' for {device_name}")
 
 
 class TyphurBridge:
@@ -368,6 +419,9 @@ class TyphurBridge:
         self.ha_client = None
         self.typhur_client = None
         self.devices = []
+        # device_id -> set of probeColor values already published to HA discovery
+        self.discovered_probes = {}
+        self._typhur_conn = None  # (broker, port) for reconnects
 
     def setup_ha_mqtt(self):
         self.ha_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="typhur_bridge_ha")
@@ -380,40 +434,73 @@ class TyphurBridge:
         self.ha_client.loop_start()
         log.info(f"Connected to HA MQTT: {self.options['mqtt_host']}:{self.options['mqtt_port']}")
 
+    def _device_by_id(self, device_id):
+        for dev in self.devices:
+            if str(dev["deviceId"]) == str(device_id):
+                return dev
+        return None
+
+    def _sync_probe_discovery(self, dev, data):
+        """Publish discovery for any probe in this message we haven't seen yet."""
+        device_id = str(dev["deviceId"])
+        seen = self.discovered_probes.setdefault(device_id, set())
+        for color in probe_colors_from_status(data):
+            if color not in seen:
+                publish_probe_discovery(self.ha_client, dev, color)
+                seen.add(color)
+
+    def subscribe_all(self, client):
+        # Model-agnostic: '+' matches any deviceModel segment, so the bridge
+        # never needs to know whether this is a WT08, WT03, or anything else.
+        for dev in self.devices:
+            topic = f"device/+/{dev['deviceId']}/pub"
+            client.subscribe(topic)
+            log.info(f"Subscribed to: {topic}")
+
+    def handle_typhur_message(self, topic, payload):
+        """Forward one Typhur cloud message to HA and keep probe discovery in sync.
+
+        Returns the resolved device_id if the message was forwarded, else None.
+        """
+        try:
+            data = json.loads(payload)
+        except ValueError as e:
+            log.error(f"Message error: {e}")
+            return None
+        if "status:report" not in data.get("cmdType", ""):
+            return None
+        # topic layout: device/{deviceModel}/{deviceId}/pub
+        parts = topic.split("/")
+        topic_device_id = parts[2] if len(parts) >= 4 else None
+        device_id = topic_device_id or str(data.get("deviceId", ""))
+        dev = self._device_by_id(device_id)
+        if dev is None:
+            return None
+        self.ha_client.publish(f"typhur/{device_id}/state", payload)
+        self._sync_probe_discovery(dev, data)
+        return device_id
+
     def setup_typhur_mqtt(self, client_id, broker, port):
+        self._typhur_conn = (broker, port)
+
         def on_connect(client, userdata, flags, rc, properties=None):
-            if rc == 0:
-                for dev in self.devices:
-                    device_id = str(dev["deviceId"])
-                    device_model = dev.get("deviceModel", "WT08")
-                    topic = f"device/{device_model}/{device_id}/pub"
-                    client.subscribe(topic)
-                    log.info(f"Subscribed to: {topic}")
-            else:
+            if rc != 0:
                 log.error(f"Typhur MQTT connection failed: rc={rc}")
+                return
+            log.info("Connected to Typhur cloud MQTT")
+            self.subscribe_all(client)
 
         def on_message(client, userdata, msg):
             try:
-                data = json.loads(msg.payload.decode())
-                if "status:report" not in data.get("cmdType", ""):
-                    return
-                for dev in self.devices:
-                    device_id = str(dev["deviceId"])
-                    device_model = dev.get("deviceModel", "WT08")
-                    if f"device/{device_model}/{device_id}/pub" == msg.topic:
-                        state_topic = f"typhur/{device_id}/state"
-                        self.ha_client.publish(state_topic, msg.payload.decode())
-                        break
+                self.handle_typhur_message(msg.topic, msg.payload.decode())
             except Exception as e:
                 log.error(f"Message error: {e}")
 
         def on_disconnect(client, userdata, rc, properties=None, reasonCode=None):
-            log.warning(f"Typhur MQTT disconnected (rc={rc}), reconnecting in 15s...")
-            time.sleep(15)
-            try:
-                client.reconnect()
-            except Exception as e:
-                log.error(f"Reconnect failed: {e}")
+            if rc == 0:
+                log.info("Typhur MQTT disconnected cleanly")
+                return
+            log.warning(f"Typhur MQTT disconnected (rc={rc}); paho will auto-reconnect")
 
         self.typhur_client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
@@ -422,13 +509,14 @@ class TyphurBridge:
         self.typhur_client.on_connect = on_connect
         self.typhur_client.on_message = on_message
         self.typhur_client.on_disconnect = on_disconnect
+        # Back off from 1s up to 2min between reconnect attempts.
+        self.typhur_client.reconnect_delay_set(min_delay=1, max_delay=120)
 
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.load_cert_chain(CERT_FILE, KEY_FILE)
         self.typhur_client.tls_set_context(ssl_ctx)
-        self.typhur_client.connect(broker, port, 60)
+        self.typhur_client.connect(broker, port, keepalive=60)
         self.typhur_client.loop_start()
-        log.info("Connected to Typhur cloud MQTT")
 
     def run(self):
         log.info("=== Typhur Bridge starting ===")
@@ -452,11 +540,15 @@ class TyphurBridge:
 
         broker, port = fetch_mqtt_params(self.token)
         self.setup_ha_mqtt()
-        self.setup_typhur_mqtt(client_id, broker, port)
 
-        time.sleep(2)
+        # Publish device-level discovery (and any probes already known) before
+        # subscribing, so live probe messages only ever add what's missing.
+        time.sleep(1)
         for dev in self.devices:
-            publish_discovery(self.ha_client, dev)
+            _, known = publish_device_discovery(self.ha_client, dev)
+            self.discovered_probes[str(dev["deviceId"])] = known
+
+        self.setup_typhur_mqtt(client_id, broker, port)
 
         log.info("Bridge running. Temperature data is being forwarded to Home Assistant.")
 
