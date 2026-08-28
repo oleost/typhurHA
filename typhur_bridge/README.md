@@ -50,6 +50,9 @@ For the device itself:
 
 ## Notes
 
+- **Tested on the Typhur Sync Quad (WT08) only.** The Sync Dual and other
+  WT-series models should work through the same model-agnostic path but are
+  unverified — feedback from other-model owners is very welcome (open an issue).
 - Data is routed via Typhur's cloud (AWS IoT). There is no local-only connection.
 - Certificates are fetched automatically from the Typhur API and cached in `/data/`. They are valid for several years.
 - The token is cached in `/data/typhur_token.txt` and refreshed automatically when it expires.

@@ -17,6 +17,11 @@ It is model-agnostic: the device model comes from the API and probe sensors are
 created from whatever the device actually reports, so no per-model
 configuration is needed.
 
+> **Tested on the Typhur Sync Quad (WT08) only.** The Sync Dual and other
+> WT-series models *should* work through the same model-agnostic path, but they
+> haven't been verified — feedback from other-model owners is very welcome
+> ([open an issue](https://github.com/oleost/typhurHA/issues)).
+
 ## Install
 
 1. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**

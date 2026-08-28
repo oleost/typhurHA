@@ -6,6 +6,8 @@ Home Assistant app that connects **Typhur Sync thermometers** (Sync Quad / WT08,
 
 The bridge is model-agnostic: it takes `deviceModel` straight from the API and probe sensors are created from whatever probes the device actually reports (2, 4, …) rather than a hardcoded count. (The MQTT subscribe topic must contain the real model — AWS IoT drops the connection if the cert policy doesn't authorize the exact topic filter, so a `+` wildcard doesn't work there.)
 
+**Only verified on the Sync Quad (WT08).** Other WT-series models take the same code path but are untested — treat other-model bug reports as the primary signal for whether the model-agnostic assumptions hold.
+
 ## Architecture
 
 ```
