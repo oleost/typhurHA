@@ -30,6 +30,9 @@ CERT_FILE = os.path.join(DATA_DIR, "typhur_client.crt")
 KEY_FILE = os.path.join(DATA_DIR, "typhur_client.key")
 CLIENT_ID_FILE = os.path.join(DATA_DIR, "typhur_client_id.txt")
 TOKEN_FILE = os.path.join(DATA_DIR, "typhur_token.txt")
+# device_id -> the subscribe topic AWS IoT accepted (SUBACK). Persisted so a
+# restart doesn't have to re-probe the topic segment for every device.
+TOPIC_CACHE_FILE = os.path.join(DATA_DIR, "typhur_topics.json")
 
 TYPHUR_API_BY_REGION = {
     "eu": "https://api.iot.typhur.de",
@@ -430,6 +433,14 @@ class TyphurBridge:
         self._typhur_conn = None  # (broker, port) for reconnects
         self._last_connect_at = 0.0
         self._backoff = RECONNECT_BACKOFF_MIN
+        # Adaptive subscribe-topic state. The topic's model segment is usually
+        # the deviceModel (Sync Quad / WT08) but not always — the Sync Dual
+        # (WT03) subscribes on 'device/thermometer/<id>/pub'. We try candidates
+        # in order across reconnects and cache whichever one the broker SUBACKs.
+        self.topic_cache = self._load_topic_cache()  # device_id -> working topic
+        self._topic_idx = {}       # device_id -> index into its candidate list
+        self._pending_sub = {}     # mid -> device_id awaiting SUBACK
+        self._current_topic = {}   # device_id -> topic used on this connection
 
     def setup_ha_mqtt(self):
         self.ha_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="typhur_bridge_ha")
@@ -457,23 +468,114 @@ class TyphurBridge:
                 publish_probe_discovery(self.ha_client, dev, color)
                 seen.add(color)
 
+    def _load_topic_cache(self):
+        try:
+            with open(TOPIC_CACHE_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items() if v}
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    def _save_topic_cache(self):
+        try:
+            with open(TOPIC_CACHE_FILE, "w") as f:
+                json.dump(self.topic_cache, f)
+        except OSError as e:
+            log.warning(f"Could not persist topic cache: {e}")
+
+    def _topic_candidates(self, dev):
+        """Ordered list of subscribe topics to try for one device.
+
+        AWS IoT drops the whole connection on an unauthorized SUBSCRIBE (it does
+        not NACK), so the bridge walks these candidates across reconnects until
+        one gets a SUBACK, then caches it.
+        """
+        device_id = str(dev["deviceId"])
+        topics = []
+
+        # 1. Explicit topic(s) from the API, if the account returns them.
+        sub_topics = dev.get("subTopics")
+        if isinstance(sub_topics, (list, tuple)):
+            topics += [str(t) for t in sub_topics if t]
+        elif isinstance(sub_topics, str) and sub_topics:
+            topics.append(sub_topics)
+
+        # 2. device/{segment}/{id}/pub for each plausible segment. deviceModel
+        #    works for the Sync Quad (WT08); 'thermometer' for the Sync Dual
+        #    (WT03). deviceType/productType are tried if the API provides them.
+        segments = []
+        for key in ("deviceModel", "deviceType", "productType"):
+            val = dev.get(key)
+            if val and str(val) not in segments:
+                segments.append(str(val))
+        if "thermometer" not in segments:
+            segments.append("thermometer")
+        for seg in segments:
+            topic = f"device/{seg}/{device_id}/pub"
+            if topic not in topics:
+                topics.append(topic)
+
+        # 3. A previously confirmed topic always goes first.
+        cached = self.topic_cache.get(device_id)
+        if cached:
+            topics = [cached] + [t for t in topics if t != cached]
+        return topics
+
+    def _current_topic_for(self, dev):
+        device_id = str(dev["deviceId"])
+        candidates = self._topic_candidates(dev)
+        idx = self._topic_idx.get(device_id, 0) % len(candidates)
+        return candidates[idx]
+
+    def _remember_topic(self, device_id, topic):
+        """Persist a topic the broker accepted so restarts skip re-probing."""
+        device_id = str(device_id)
+        if not topic or self.topic_cache.get(device_id) == topic:
+            return
+        self.topic_cache[device_id] = topic
+        self._save_topic_cache()
+        log.info(f"Confirmed subscribe topic for {device_id}: {topic}")
+
+    def _advance_unacked_topics(self):
+        """After a fast drop, step each un-SUBACKed device to its next candidate.
+
+        A SUBACK means the topic filter was authorized, so any device still
+        pending when the connection dropped is one AWS IoT rejected.
+        """
+        for device_id in list(self._pending_sub.values()):
+            dev = self._device_by_id(device_id)
+            if dev is None:
+                continue
+            candidates = self._topic_candidates(dev)
+            if len(candidates) <= 1:
+                continue
+            self._topic_idx[device_id] = (
+                self._topic_idx.get(device_id, 0) + 1
+            ) % len(candidates)
+            log.warning(
+                f"No SUBACK for {device_id} before the drop — AWS IoT likely "
+                f"rejected '{self._current_topic.get(device_id)}'. "
+                f"Next attempt: {candidates[self._topic_idx[device_id]]}"
+            )
+        self._pending_sub = {}
+
     def subscribe_all(self, client):
-        # The deviceModel comes straight from the API (device/bind/list), so this
-        # stays model-agnostic — but the topic MUST contain the real model, not a
-        # wildcard: AWS IoT closes the connection if the cert's policy doesn't
-        # authorize the exact topic filter, and '+' is not authorized.
+        self._pending_sub = {}
         for dev in self.devices:
-            model = dev.get("deviceModel")
-            if not model:
-                model = "WT08"
-                log.warning(
-                    f"device {dev['deviceId']} has no 'deviceModel' in the API "
-                    f"response — falling back to '{model}'. Keys present: "
-                    f"{sorted(dev.keys())}"
-                )
-            topic = f"device/{model}/{dev['deviceId']}/pub"
-            client.subscribe(topic)
-            log.info(f"Subscribed to: {topic}")
+            device_id = str(dev["deviceId"])
+            candidates = self._topic_candidates(dev)
+            topic = self._current_topic_for(dev)
+            self._current_topic[device_id] = topic
+            _result, mid = client.subscribe(topic)
+            if mid is not None:
+                self._pending_sub[mid] = device_id
+            suffix = ""
+            if len(candidates) > 1:
+                idx = self._topic_idx.get(device_id, 0) % len(candidates)
+                suffix = f"  (topic candidate {idx + 1}/{len(candidates)})"
+            log.info(f"Subscribing to: {topic}{suffix}")
 
     def handle_typhur_message(self, topic, payload):
         """Forward one Typhur cloud message to HA and keep probe discovery in sync.
@@ -494,6 +596,9 @@ class TyphurBridge:
         dev = self._device_by_id(device_id)
         if dev is None:
             return None
+        # A message actually arrived on this topic — strongest possible proof
+        # that the subscribe filter is authorized.
+        self._remember_topic(device_id, topic)
         self.ha_client.publish(f"typhur/{device_id}/state", payload)
         self._sync_probe_discovery(dev, data)
         return device_id
@@ -529,19 +634,38 @@ class TyphurBridge:
             except Exception as e:
                 log.error(f"Message error: {e}")
 
+        def on_subscribe(client, userdata, mid, reason_code_list, properties=None):
+            device_id = self._pending_sub.pop(mid, None)
+            if device_id is None:
+                return
+            rc = reason_code_list[0] if reason_code_list else None
+            if rc is not None and getattr(rc, "is_failure", False):
+                log.warning(
+                    f"Typhur MQTT SUBACK reported failure for {device_id}: {rc}"
+                )
+                return
+            topic = self._current_topic.get(device_id)
+            log.info(f"Subscribed to: {topic}")
+            self._remember_topic(device_id, topic)
+
         # paho 2.x VERSION2 signature: (client, userdata, disconnect_flags,
         # reason_code, properties). This bridge never disconnects on purpose, so
         # every call here is an unexpected drop.
         def on_disconnect(client, userdata, disconnect_flags=None,
                           reason_code=None, properties=None):
             uptime = time.time() - self._last_connect_at
+            # A drop right after connecting is almost always an unauthorized
+            # SUBSCRIBE. Step any un-SUBACKed device to its next topic candidate
+            # so the reconnect tries a different segment.
+            if uptime < 30 and self._pending_sub:
+                self._advance_unacked_topics()
             delay = self.next_reconnect_backoff(uptime)
             if delay >= 60:
                 log.error(
                     f"Typhur MQTT dropped after only {uptime:.0f}s connected "
-                    f"(reason={reason_code}) — this usually means AWS IoT "
-                    f"rejected the SUBSCRIBE topic (check the deviceModel logged "
-                    f"above). Waiting {delay}s before retrying."
+                    f"(reason={reason_code}) — AWS IoT most likely rejected the "
+                    f"SUBSCRIBE topic. The bridge will try the next topic "
+                    f"candidate on reconnect. Waiting {delay}s before retrying."
                 )
             else:
                 log.warning(
@@ -556,6 +680,7 @@ class TyphurBridge:
         )
         self.typhur_client.on_connect = on_connect
         self.typhur_client.on_message = on_message
+        self.typhur_client.on_subscribe = on_subscribe
         self.typhur_client.on_disconnect = on_disconnect
         # We handle the real backoff in on_disconnect; keep paho's own delay tiny.
         self.typhur_client.reconnect_delay_set(min_delay=1, max_delay=2)
@@ -585,6 +710,15 @@ class TyphurBridge:
             log.error("No devices found. Check your credentials or token.")
             raise SystemExit(1)
         log.info(f"Found {len(self.devices)} device(s)")
+        for dev in self.devices:
+            # Logged so other-model bug reports carry the fields we'd need to
+            # pin down the right subscribe topic without guessing.
+            log.info(
+                "Device %s: model=%s type=%s subTopics=%s"
+                % (dev.get("deviceId"), dev.get("deviceModel"),
+                   dev.get("deviceType"), dev.get("subTopics"))
+            )
+            log.debug(f"Full device payload: {json.dumps(dev, default=str)}")
 
         broker, port = fetch_mqtt_params(self.token)
         self.setup_ha_mqtt()

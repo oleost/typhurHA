@@ -54,6 +54,10 @@ For the device itself:
   WT-series models should work through the same model-agnostic path but are
   unverified — feedback from other-model owners is very welcome (open an issue).
 - Data is routed via Typhur's cloud (AWS IoT). There is no local-only connection.
+- The MQTT subscribe topic segment differs per model (`WT08` for the Sync Quad,
+  `thermometer` for the Sync Dual). The bridge tries the candidates in order,
+  advancing whenever AWS IoT rejects one, and caches the working topic in
+  `/data/typhur_topics.json`.
 - Certificates are fetched automatically from the Typhur API and cached in `/data/`. They are valid for several years.
 - The token is cached in `/data/typhur_token.txt` and refreshed automatically when it expires.
 - The MQTT broker endpoint is fetched dynamically from the Typhur API — no hardcoded server addresses.

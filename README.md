@@ -40,6 +40,9 @@ Probe sensors appear the first time a probe sends a reading.
 ## Notes
 
 - Data is routed through Typhur's cloud (AWS IoT); there is no local-only connection.
+- The subscribe topic segment differs per model (`WT08` for the Sync Quad,
+  `thermometer` for the Sync Dual). The bridge probes the candidates
+  automatically and caches the one AWS IoT accepts in `/data/typhur_topics.json`.
 - Certificates and token are cached in `/data/` and refreshed automatically.
 - The `SIGN_CONSTANT`, `APP_ID`, and `APP_VERSION` constants in `run.py` are
   extracted from the Typhur APK and are the same for all users — not secrets.

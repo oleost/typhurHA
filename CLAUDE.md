@@ -67,7 +67,14 @@ Example response:
 
 ### MQTT topics
 
-- Subscribe: `device/{deviceModel}/{deviceId}/pub` (`deviceModel` comes from the API; a `+` wildcard here gets the connection dropped by AWS IoT)
+- Subscribe: `device/{segment}/{deviceId}/pub`. A `+` wildcard gets the
+  connection dropped by AWS IoT, so the segment must be exact.
+  - Sync Quad (WT08): segment is the `deviceModel` → `device/WT08/{id}/pub`
+  - Sync Dual (WT03): segment is `thermometer` → `device/thermometer/{id}/pub`
+  - The bridge is adaptive: it tries candidates in order (`subTopics` from the
+    API → `deviceModel` → `deviceType`/`productType` → `thermometer`), advances
+    to the next one whenever a SUBSCRIBE fails to SUBACK before the connection
+    drops, and caches the topic that works in `/data/typhur_topics.json`.
 - Relevant messages: `cmdType` contains `"status:report"`
 
 ### Temperature encoding
