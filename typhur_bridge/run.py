@@ -259,6 +259,7 @@ def get_devices(token):
     data = resp.json()
     if data.get("code") == "0":
         return data.get("data", [])
+    log.error(f"device/bind/list failed — code {data.get('code')}: {data.get('msg')}")
     return []
 
 
